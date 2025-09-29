@@ -9,7 +9,6 @@ import java.io.File
 
 class HttpDownload {
     private val receiveFlow = MutableStateFlow(0L)
-    private var append = false
 
     suspend fun httpDownload(
         file: File,
@@ -36,6 +35,7 @@ class HttpDownload {
 
         val ffmpegCommand = buildString {
             if (headers.isNotEmpty()) append("-headers \"$headers\" ")
+            append("-extension_picky 0 ")
             append("-i \"${source.request.url}\" ")
             append("-c copy ")
             append("\"${file.absolutePath}\"")
@@ -46,11 +46,11 @@ class HttpDownload {
             it ?: return@execute
             if (nextIsDuration) {
                 val duration = durationToTime(it) ?: 0L
-                progressFlow.emit(Progress(progress =  duration))
+                progressFlow.tryEmit(Progress(progress =  duration))
             }
             nextIsDuration = it.contains("Duration:")
         }) {
-            progressFlow.emit(Progress(progress =  it.time.toLong(), speed = it.bitrate.toLong()))
+            progressFlow.tryEmit(Progress(size = it.size, progress =  it.time.toLong(), speed = it.bitrate.toLong()))
         }
         file
     }
@@ -66,7 +66,7 @@ class HttpDownload {
         source: Streamable.Source.Http,
         progressFlow: MutableStateFlow<Progress>
     ) = runCatching {
-        okHttpDownload(file, source.request, append, progressFlow, receiveFlow)
+        okHttpDownload(file, source.request, progressFlow, receiveFlow)
     }
 
     companion object {

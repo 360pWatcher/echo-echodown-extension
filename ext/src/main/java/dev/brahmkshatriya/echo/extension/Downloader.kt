@@ -1,6 +1,7 @@
 package dev.brahmkshatriya.echo.extension
 
 import dev.brahmkshatriya.echo.common.helpers.ContinuationCallback.Companion.await
+import dev.brahmkshatriya.echo.common.models.NetworkRequest
 import dev.brahmkshatriya.echo.common.models.Progress
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -12,24 +13,24 @@ import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
-import dev.brahmkshatriya.echo.common.models.Request as EchoRequest
 
 object Downloader {
+
+    private const val BUFFER_SIZE = 512 * 1024
 
     suspend fun download(
         file: File,
         stream: InputStream,
         totalBytes: Long,
-        append: Boolean,
         progressFlow: MutableSharedFlow<Progress>? = null,
         receiveFlow: MutableStateFlow<Long>? = null,
     ) = withContext(Dispatchers.IO) {
-        progressFlow?.emit(Progress(totalBytes))
+        progressFlow?.tryEmit(Progress(totalBytes))
 
-        stream.buffered().use { bis ->
-            val fos = FileOutputStream(file, append)
-            fos.buffered().use { out ->
-                val buffer = ByteArray(256 * 1024)
+        stream.buffered(BUFFER_SIZE).use { bis ->
+            val fos = FileOutputStream(file, false)
+            fos.buffered(BUFFER_SIZE).use { out ->
+                val buffer = ByteArray(BUFFER_SIZE)
                 var received = 0L
 
                 var lastTime = System.currentTimeMillis()
@@ -46,7 +47,7 @@ object Downloader {
                         val speed = received - lastBytes
                         lastBytes = received
                         lastTime = now
-                        progressFlow?.emit(Progress(totalBytes, received, speed))
+                        progressFlow?.tryEmit(Progress(totalBytes, received, speed))
                     }
                 }
             }
@@ -58,14 +59,17 @@ object Downloader {
 
     suspend fun okHttpDownload(
         file: File,
-        req: EchoRequest,
-        append: Boolean,
+        req: NetworkRequest,
         progressFlow: MutableSharedFlow<Progress>? = null,
         receiveFlow: MutableStateFlow<Long>? = null,
     ): File {
         val fileLength = file.length()
         receiveFlow?.value = fileLength
-        val headers = (req.headers + mapOf("Range" to "bytes=${fileLength}-")).toHeaders()
+        val headers = req.headers.toMutableMap().apply {
+            if (fileLength > 0) {
+                put("Range", "bytes=$fileLength-")
+            }
+        }.toHeaders()
         val request = Request.Builder().url(req.url).headers(headers).build()
         val response = client.newCall(request).await()
 
@@ -74,7 +78,6 @@ object Downloader {
             file,
             response.body.byteStream(),
             totalBytes,
-            append,
             progressFlow,
             receiveFlow
         )

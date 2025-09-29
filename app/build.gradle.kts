@@ -6,12 +6,20 @@ plugins {
 dependencies {
     implementation(project(":ext"))
     val libVersion: String by project
-    compileOnly("com.github.brahmkshatriya:echo:$libVersion")
-    compileOnly("org.jetbrains.kotlin:kotlin-stdlib:2.1.0")
+    compileOnly("dev.brahmkshatriya.echo:common:$libVersion")
+    compileOnly("org.jetbrains.kotlin:kotlin-stdlib:2.2.10")
 
     implementation(files("libs/ffmpeg-kit.aar"))
-    implementation("net.jthink:jaudiotagger:3.0.1")
     implementation("com.arthenica:smart-exception-java:0.2.1")
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+kotlin {
+    jvmToolchain(17)
 }
 
 val extType: String by project
@@ -43,19 +51,6 @@ tasks.register("generateProguardRules") {
             """
             -dontobfuscate
             -keep,allowoptimization class dev.brahmkshatriya.echo.extension.$extClass
-            -keep class org.jaudiotagger.** { *; }
-            -dontwarn java.awt.image.BufferedImage
-            -dontwarn javax.imageio.ImageIO
-            -dontwarn javax.imageio.stream.ImageInputStream
-            -dontwarn com.arthenica.smartexception.java.Exceptions
-            -dontwarn java.awt.Graphics2D
-            -dontwarn java.awt.Image
-            -dontwarn java.awt.geom.AffineTransform
-            -dontwarn java.awt.image.ImageObserver
-            -dontwarn java.awt.image.RenderedImage
-            -dontwarn javax.imageio.ImageWriter
-            -dontwarn javax.imageio.stream.ImageOutputStream
-            -dontwarn javax.swing.filechooser.FileFilter
             """.trimIndent()
         )
     }
@@ -65,21 +60,13 @@ tasks.named("preBuild") {
     dependsOn("generateProguardRules")
 }
 
-tasks.register("uninstall") {
-    android.run {
-        execute(
-            adbExecutable.absolutePath, "shell", "pm", "uninstall", defaultConfig.applicationId!!
-        )
-    }
-}
-
 android {
     namespace = "dev.brahmkshatriya.echo.extension"
-    compileSdk = 35
+    compileSdk = 36
     defaultConfig {
         applicationId = "dev.brahmkshatriya.echo.extension.$extId"
         minSdk = 24
-        targetSdk = 35
+        targetSdk = 36
 
         manifestPlaceholders.apply {
             put("type", "dev.brahmkshatriya.echo.${extType}")
@@ -117,23 +104,8 @@ android {
             )
         }
     }
-
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
-    }
-
-    kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_17.toString()
-    }
 }
 
-fun execute(vararg command: String): String {
-    val processBuilder = ProcessBuilder(*command)
-    val hashCode = command.joinToString().hashCode().toString()
-    val output = File.createTempFile(hashCode, "")
-    processBuilder.redirectOutput(output)
-    val process = processBuilder.start()
-    process.waitFor()
-    return output.readText().dropLast(1)
-}
+fun execute(vararg command: String): String = providers.exec {
+    commandLine(*command)
+}.standardOutput.asText.get().trim()

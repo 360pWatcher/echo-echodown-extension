@@ -8,7 +8,6 @@ import java.io.InputStream
 
 class InputStreamDownload {
     private val receiveFlow = MutableStateFlow(0L)
-    private var append = false
 
     suspend fun inputStreamDownload(
         file: File,
@@ -17,7 +16,7 @@ class InputStreamDownload {
         totalBytes: Long
     ): File {
         runCatching {
-            download(file, stream, totalBytes, append, progressFlow, receiveFlow)
+            download(file, stream, totalBytes, progressFlow, receiveFlow)
         }.getOrElse {
             file.delete()
         }

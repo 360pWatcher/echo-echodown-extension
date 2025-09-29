@@ -1,11 +1,17 @@
-import com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar
-
 plugins {
     id("java-library")
     id("org.jetbrains.kotlin.jvm")
-    id("com.gradleup.shadow") version "8.3.0"
     id("maven-publish")
+    id("com.gradleup.shadow") version "9.0.2"
     /** PROTOBUF **/
+}
+
+dependencies {
+    val libVersion: String by project
+    compileOnly("dev.brahmkshatriya.echo:common:$libVersion")
+    compileOnly("org.jetbrains.kotlin:kotlin-stdlib:2.2.10")
+
+    /** BCPROV **/
 }
 
 java {
@@ -15,14 +21,6 @@ java {
 
 kotlin {
     jvmToolchain(17)
-}
-
-dependencies {
-    val libVersion: String by project
-    compileOnly("com.github.brahmkshatriya:echo:$libVersion")
-
-    /** PROTOBUF **/
-    /** BCPROV **/
 }
 
 // Extension properties goto `gradle.properties` to set values
@@ -59,7 +57,7 @@ publishing {
 }
 
 tasks {
-    val shadowJar by getting(ShadowJar::class) {
+    shadowJar {
         archiveBaseName.set(extId)
         archiveVersion.set(verName)
         manifest {
@@ -101,12 +99,6 @@ tasks {
  *
  **/
 
-fun execute(vararg command: String): String {
-    val processBuilder = ProcessBuilder(*command)
-    val hashCode = command.joinToString().hashCode().toString()
-    val output = File.createTempFile(hashCode, "")
-    processBuilder.redirectOutput(output)
-    val process = processBuilder.start()
-    process.waitFor()
-    return output.readText().dropLast(1)
-}
+fun execute(vararg command: String): String = providers.exec {
+    commandLine(*command)
+}.standardOutput.asText.get().trim()

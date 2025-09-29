@@ -1,32 +1,33 @@
 package dev.brahmkshatriya.echo.extension.tasks
 
 import android.annotation.SuppressLint
+import android.graphics.BitmapFactory
 import android.util.LruCache
 import dev.brahmkshatriya.echo.common.Extension
 import dev.brahmkshatriya.echo.common.clients.AlbumClient
 import dev.brahmkshatriya.echo.common.clients.LyricsClient
-import dev.brahmkshatriya.echo.common.helpers.PagedData
 import dev.brahmkshatriya.echo.common.models.Album
 import dev.brahmkshatriya.echo.common.models.DownloadContext
+import dev.brahmkshatriya.echo.common.models.Feed
+import dev.brahmkshatriya.echo.common.models.Feed.Companion.loadAll
 import dev.brahmkshatriya.echo.common.models.ImageHolder
+import dev.brahmkshatriya.echo.common.models.ImageHolder.Companion.toImageHolder
 import dev.brahmkshatriya.echo.common.models.Lyrics
 import dev.brahmkshatriya.echo.common.models.Progress
 import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.extension.AndroidED
-import dev.brahmkshatriya.echo.extension.AndroidED.Companion.illegalChars
+import dev.brahmkshatriya.echo.extension.AndroidED.Companion.illegalReplace
 import dev.brahmkshatriya.echo.extension.Downloader.okHttpDownload
 import dev.brahmkshatriya.echo.extension.EDExtension.Companion.get
 import dev.brahmkshatriya.echo.extension.EDExtension.Companion.getExtension
 import dev.brahmkshatriya.echo.extension.FFMpegHelper
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.withContext
-import org.jaudiotagger.audio.AudioFileIO
-import org.jaudiotagger.tag.FieldKey
-import org.jaudiotagger.tag.TagOptionSingleton
-import org.jaudiotagger.tag.images.ArtworkFactory
 import java.io.File
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import kotlin.io.encoding.Base64
 
 class Tag(
     private val androidED: AndroidED
@@ -48,22 +49,21 @@ class Tag(
 
             val albumKey = "${context.extensionId}:${track.album?.id}"
             val cachedAlbum = albumCache.get(albumKey)
+            val extension = musicExtensions.getExtension(context.extensionId)
             val album = cachedAlbum ?: run {
-                val albumExt = musicExtensions.getExtension(context.extensionId)
-                val loaded = async { loadAlbum(albumExt, track) }.await()
+                val loaded = loadAlbum(extension, track)
                 if (loaded != null) albumCache.put(albumKey, loaded)
                 loaded
             }
             progressFlow.emit(Progress(4, progress = 1))
 
-            val coverFile = async { saveCoverBitmap(file, context.track) }.await()
+            val coverFile = saveCoverBitmap(file,context.track)
             progressFlow.emit(Progress(4, progress = 2))
 
-            val lyrics = async {
-                androidED.run {
-                    getActualLyrics(context, downLyrics, syncLyrics, downFallbackLyrics)
-                }
-            }.await()
+            val lyrics = androidED.run {
+                getActualLyrics(context, downLyrics, syncLyrics, downFallbackLyrics, extension)
+            }
+
             progressFlow.emit(Progress(4, progress = 3))
 
             writeTags(
@@ -73,8 +73,8 @@ class Tag(
                 coverFile,
                 lyrics,
                 downloadsDir,
-                androidED.folderStructure,
-                album
+                album,
+                extension
             )
         }.getOrElse {
             throw it
@@ -83,7 +83,6 @@ class Tag(
         finalFile
     }
 
-    @SuppressLint("DefaultLocale")
     private suspend fun writeTags(
         file: File,
         context: DownloadContext,
@@ -91,20 +90,10 @@ class Tag(
         coverFile: File?,
         lyrics: Lyrics?,
         downloadsDir: File,
-        folderStructure: String,
         album: Album?,
-        isVideo: Boolean = false
-    ): File = withContext(Dispatchers.IO) {
-        fun formatTime(millis: Long): String {
-            val mm = millis / 60000
-            val remainder = millis % 60000
-            val ss = remainder / 1000
-            val ms = remainder % 1000
-
-            val hundredths = (ms / 10)
-            return String.format("[%02d:%02d.%02d]", mm, ss, hundredths)
-        }
-
+        extension: Extension<*>?,
+        hasCover: Boolean = false
+    ): File {
         val lyricsText = when (val lyric = lyrics?.lyrics) {
             is Lyrics.Timed -> {
                 lyric.list.joinToString("\n") { item ->
@@ -116,84 +105,52 @@ class Tag(
                 lyric.text
             }
 
-            null -> {
-                ""
-            }
+            else -> null
         }
 
         val fileExtension = file.extension.lowercase()
-        println("File extension: $fileExtension")
+        val extName = extension?.name.orEmpty()
 
         val finalFile = runCatching {
-           val preFile = if (fileExtension == "mp3" || fileExtension == "m4a" && !isVideo) {
-                jAudioTagger(file, context, track, coverFile, lyricsText, album)
-            } else {
-                ffmpegTag(file, context, track, coverFile, lyricsText, fileExtension, album, isVideo)
-            }
-            rename(context, folderStructure, downloadsDir, preFile)
+            val preFile = ffmpegTag(file, context, track, coverFile, lyricsText, fileExtension, album, extName, hasCover)
+            rename(context, downloadsDir, preFile, track)
         }.getOrElse { e ->
-            when ("Video file") {
-                in e.toString() -> {
-                    writeTags(file, context, track, coverFile, lyrics, downloadsDir, folderStructure, album,true)
-                }
-
-                else -> {
-                    coverFile?.delete()
-                    throw e
-                }
+            val eString = e.toString()
+            if (eString.contains("JPEG-LS support not enabled")) {
+                writeTags(file, context, track, coverFile, lyrics, downloadsDir, album, extension, true)
+            } else {
+                coverFile?.delete()
+                throw e
             }
         }
-        finalFile
+        return finalFile
     }
 
     private fun rename(
         context: DownloadContext,
-        folderStructure: String,
         downloadsDir: File,
-        preFile: File
+        preFile: File,
+        track: Track
     ): File {
         val parentFolderName = context.context?.title
-        val sanitizedParent = illegalChars.replace(parentFolderName.orEmpty(), "_")
-        val folder = if (sanitizedParent.isNotBlank()) "$folderStructure$sanitizedParent" else "Echo/"
+        val sanitizedParent = illegalReplace(parentFolderName.orEmpty())
+        val folder = if (sanitizedParent.isNotBlank()) {
+            "${androidED.folderStructure}$sanitizedParent"
+        } else if (androidED.albumFolder) {
+            "${androidED.folderStructure}${illegalReplace(track.album?.title.orEmpty())}"
+        } else {
+            "Echo/"
+        }
         val targetDirectory = File(downloadsDir, folder).apply { mkdirs() }
-        val targetFile = File(targetDirectory, preFile.name)
+        var targetFile = File(targetDirectory, preFile.name)
+        var count = 0
+        while (targetFile.exists()) {
+            count++
+            targetFile = File(targetDirectory, "$count ${preFile.name}")
+        }
         preFile.copyTo(targetFile)
         preFile.delete()
         return targetFile
-    }
-
-    private val tagOptionSingleton by lazy { TagOptionSingleton.getInstance().isAndroid = true }
-
-    private suspend fun jAudioTagger(
-        file: File,
-        context: DownloadContext,
-        track: Track,
-        coverFile: File?,
-        lyricsText: String,
-        album: Album?
-    ): File = withContext(Dispatchers.IO) {
-        tagOptionSingleton
-
-        val audioFile = AudioFileIO.read(file)
-        val tag = audioFile.tagOrCreateAndSetDefault
-
-        tag.setField(FieldKey.TRACK, (context.sortOrder ?: 0).toString())
-        tag.setField(FieldKey.TITLE, illegalChars.replace(track.title, "_"))
-        tag.setField(FieldKey.ARTIST, track.artists.joinToString(", ") { it.name })
-        tag.setField(FieldKey.ALBUM_ARTIST, album?.artists.orEmpty().joinToString(", ") { it.name })
-        tag.setField(FieldKey.ALBUM, illegalChars.replace(track.album?.title.orEmpty(), "_"))
-        tag.setField(FieldKey.YEAR, track.releaseDate.toString())
-        tag.setField(FieldKey.LYRICS, lyricsText)
-
-        coverFile?.let {
-            val artwork = ArtworkFactory.createArtworkFromFile(it)
-            tag.deleteArtworkField()
-            tag.addField(artwork)
-        }
-
-        AudioFileIO.write(audioFile)
-        coverFile?.delete()
-        file
     }
 
     private suspend fun ffmpegTag(
@@ -201,45 +158,72 @@ class Tag(
         context: DownloadContext,
         track: Track,
         coverFile: File?,
-        lyricsText: String,
+        lyricsText: String?,
         fileExtension: String,
         album: Album?,
-        isVideo: Boolean
+        extName: String,
+        hasCover: Boolean
     ): File {
-        val mp4File = if (fileExtension == "m4a" && isVideo) {
-            Merge.getUniqueFile(file.parentFile!!, file.name.substringBefore("."), "mp4", file)
-        } else {
-            null
-        }
+        val outputFile = File(file.parent, "temp_${file.name}")
 
-        val outputFile = if(mp4File != null) File(mp4File.parent, "temp_${mp4File.name}")
-           else File(file.parent, "temp_${file.name}")
-
-        val mdOrder = "track=\"${context.sortOrder ?: 0}\""
-        val mdTitle = "title=\"${illegalChars.replace(track.title, "_")}\""
+        val mdOrder = "track=\"${context.sortOrder ?: track.albumOrderNumber ?: 0}\""
+        val mdTitle = "title=\"${illegalReplace(track.title)}\""
         val mdArtist = "artist=\"${track.artists.joinToString(", ") { it.name }}\""
-        val mdAlbumArtist = "albumartist=\"${album?.artists.orEmpty().joinToString(", ") { it.name }}\""
-        val mdAlbumYear = "year=\"${track.releaseDate}\""
-        val mdAlbum = "album=\"${illegalChars.replace(track.album?.title.orEmpty(), "_")}\""
+        val mdAlbumArtist = "album_artist=\"${album?.artists.orEmpty().joinToString(", ") { illegalReplace(it.name)  }}\""
+        val mdAlbumYear = if(fileExtension == "flac" || fileExtension == "mp4") "year=\"${track.releaseDate}\"" else "date=\"${track.releaseDate}\""
+        val mdAlbum = "album=\"${illegalReplace(track.album?.title.orEmpty())}\""
+        val mdGenre = "genre=\"${track.genres.joinToString(", ") { it }}\""
+        val mdDisc =  "discnumber=\"${track.albumDiscNumber}\""
+        val mdIsrc = "isrc=\"${track.isrc}\""
+        val mdServiceProvider = "service_provider=Echo"
+        val mdServiceName = "service_name=\"$extName\""
 
         val mdCoverTitle = "title=\"Album cover\""
         val medCoverComment = "comment=\"Cover (front)\""
 
         val cmd = buildString {
-            if (mp4File != null) {
-                append("-i \"${mp4File.absolutePath}\" ")
-            } else {
-                append("-i \"${file.absolutePath}\" ")
+            append("-y ")
+            append("-i \"${file.absolutePath}\" ")
+            when (fileExtension) {
+                "m4a", "flac", "mp3" -> {
+                    if (coverFile != null && !hasCover) {
+                        append("-i \"${coverFile.absolutePath}\" ")
+                        append("-map 0:a ")
+                        append("-map 1:v ")
+                        append("-c:a copy ")
+                        append("-c:v copy ")
+                        append("-disposition:v:0 attached_pic ")
+                    } else {
+                        append("-map 0 ")
+                        append("-c copy ")
+                    }
+                    if (fileExtension == "mp3") {
+                        append("-id3v2_version 3 ")
+                    }
+                }
+
+                "ogg" -> {
+                    if (coverFile != null && !hasCover) {
+                        val blockPic = vorbisPictureBlockBase64(coverFile)
+                        append("-metadata METADATA_BLOCK_PICTURE=$blockPic ")
+                    }
+                    append("-c:a copy ")
+                }
+
+                else -> {
+                    if (coverFile != null && !hasCover) {
+                        append("-i \"${coverFile.absolutePath}\" ")
+                        append("-map 0 ")
+                        append("-map 1 ")
+                    } else {
+                        append("-map 0 ")
+                    }
+                    append("-c copy ")
+                }
             }
-            append("-i \"${coverFile?.absolutePath}\" ")
-            if (isVideo) {
-                append("-map 0 ")
-                append("-map 1 ")
-                append("-c copy ")
-                append("-c:v:1 mjpeg ")
-            } else {
-                append("-c copy ")
-                append("-c:v mjpeg ")
+            if (coverFile != null && !hasCover) {
+                append("-metadata:s:v:0 $mdCoverTitle ")
+                append("-metadata:s:v:0 $medCoverComment ")
             }
             append("-metadata $mdOrder ")
             append("-metadata $mdTitle ")
@@ -247,28 +231,26 @@ class Tag(
             append("-metadata $mdAlbum ")
             append("-metadata $mdAlbumYear ")
             append("-metadata $mdAlbumArtist ")
-            append("-metadata lyrics=\"${lyricsText.replace("\"", "'")}\" ")
-            if (isVideo) {
-                append("-metadata:s:v:1 $mdCoverTitle ")
-                append("-metadata:s:v:1 $medCoverComment ")
-                append("-f mp4 ")
-            } else {
-                append("-metadata:s:v $mdCoverTitle ")
-                append("-metadata:s:v $medCoverComment ")
-                append("-disposition:v attached_pic ")
+            append("-metadata $mdGenre ")
+            append("-metadata $mdDisc ")
+            append("-metadata $mdIsrc ")
+            append("-metadata $mdServiceName ")
+            append("-metadata $mdServiceProvider ")
+            if (lyricsText != null) {
+                if (fileExtension == "mp3") {
+                    append("-metadata lyrics-eng=\"${lyricsText.replace("\"", "'")}\" ")
+                } else {
+                    append("-metadata lyrics=\"${lyricsText.replace("\"", "'")}\" ")
+                }
             }
             append("\"${outputFile.absolutePath}\"")
         }
 
         FFMpegHelper.execute(cmd)
-        if (mp4File != null) {
-            if (mp4File.delete()) outputFile.renameTo(mp4File)
-        } else {
-            if (file.delete()) outputFile.renameTo(file)
-        }
+        if (file.delete()) outputFile.renameTo(file)
 
         coverFile?.delete()
-        return mp4File ?: file
+        return file
     }
 
     private suspend fun loadAlbum(
@@ -284,9 +266,12 @@ class Tag(
         val coverFile = File(file.parent, "cover_temp_${track.hashCode()}.jpeg")
         if (coverFile.exists() && !coverFile.delete()) return null
         return runCatching {
-            val holder = track.cover as? ImageHolder.UrlRequestImageHolder
-                ?: throw IllegalArgumentException("Invalid ImageHolder type")
-            okHttpDownload(coverFile, holder.request, false)
+            val request = when (val cover = track.cover) {
+                is ImageHolder.ResourceUriImageHolder -> cover.uri.toImageHolder().request
+                is ImageHolder.NetworkRequestImageHolder -> cover.request
+                else -> throw IllegalArgumentException("Invalid ImageHolder type")
+            }
+            okHttpDownload(coverFile, request)
         }.getOrElse {
             it.printStackTrace()
             coverFile.delete()
@@ -294,15 +279,52 @@ class Tag(
         }
     }
 
+    private fun vorbisPictureBlockBase64(cover: File): String {
+        val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(cover.absolutePath, opts)
+        val w = opts.outWidth
+        val h = opts.outHeight
+
+        val mimeBytes = "image/jpeg".toByteArray(Charsets.UTF_8)
+        // 4(picture type) +4(mime len)+mime +4(desc len)+4*4(dim & depth)+4(data len)
+        val hdrSize = 4 + 4 + mimeBytes.size + 4 + (4*4) + 4
+        val imgLen = cover.length().toInt()
+
+        val bb = ByteBuffer.allocate(hdrSize + imgLen)
+            .order(ByteOrder.BIG_ENDIAN)
+            .apply {
+                putInt(3) // front cover
+                putInt(mimeBytes.size) // mime length
+                put(mimeBytes) // "image/jpeg"
+                putInt(0)  // desc length
+                putInt(w) // width
+                putInt(h) // height
+                putInt(24)  // color depth
+                putInt(0) // colors
+                putInt(imgLen) // data length
+            }
+
+        cover.inputStream().buffered().use { input ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            var read = input.read(buffer)
+            while (read != -1) {
+                bb.put(buffer, 0, read)
+                read = input.read(buffer)
+            }
+        }
+
+        return Base64.encode(bb.array())
+    }
+
     private suspend fun getActualLyrics(
         context: DownloadContext,
         downLyrics: Boolean,
         syncLyrics: Boolean,
-        downFallbackLyrics: String
+        downFallbackLyrics: String,
+        extension: Extension<*>?
     ) : Lyrics? {
         try {
-            if (!downLyrics) return null
-            val extension = musicExtensions.getExtension(context.extensionId) ?: return null
+            if (!downLyrics || extension == null) return null
             val extensionLyrics = getLyrics(extension, context.track, context.extensionId)
             if (extensionLyrics != null &&
                 (extensionLyrics.lyrics is Lyrics.Timed || extensionLyrics.lyrics is Lyrics.Simple)
@@ -325,7 +347,7 @@ class Tag(
         track: Track,
         clientId: String
     ): Lyrics? {
-        val data = extension.get<LyricsClient, PagedData<Lyrics>> {
+        val data = extension.get<LyricsClient, Feed<Lyrics>> {
             searchTrackLyrics(clientId, track)
         }
         val value = data.getOrNull()?.loadAll()?.firstOrNull()
@@ -354,7 +376,20 @@ class Tag(
         } else this
     }
 
+    @SuppressLint("DefaultLocale")
+    private fun formatTime(millis: Long): String {
+        val mm = millis / 60000
+        val remainder = millis % 60000
+        val ss = remainder / 1000
+        val ms = remainder % 1000
+
+        val hundredths = (ms / 10)
+        return String.format(TIME_FORMAT, mm, ss, hundredths)
+    }
+
     companion object {
         private val albumCache = LruCache<String, Album>(50)
+
+        private const val TIME_FORMAT = "[%02d:%02d.%02d]"
     }
 }

@@ -2,7 +2,7 @@ package dev.brahmkshatriya.echo.extension.tasks
 
 import dev.brahmkshatriya.echo.common.models.DownloadContext
 import dev.brahmkshatriya.echo.common.models.Progress
-import dev.brahmkshatriya.echo.extension.AndroidED.Companion.illegalChars
+import dev.brahmkshatriya.echo.extension.AndroidED.Companion.illegalReplace
 import dev.brahmkshatriya.echo.extension.FFMpegHelper
 import kotlinx.coroutines.flow.MutableSharedFlow
 import java.io.File
@@ -12,17 +12,18 @@ class Merge {
         progressFlow: MutableSharedFlow<Progress>,
         context: DownloadContext,
         files: List<File>,
-        trackNum: Boolean
+        trackNum: Boolean,
+        isVideo: Boolean
     ): File {
         val file = files.first()
         progressFlow.emit(Progress(4, 1))
-        val detectedExtension = FFMpegHelper.probeFileFormat(file)
+        val detectedExtension = FFMpegHelper.probeFileFormat(file, isVideo)
         progressFlow.emit(Progress(4, 2))
         val sanitizedTitle =
             if (context.sortOrder != null && trackNum)
-                "${context.sortOrder}_${illegalChars.replace(context.track.title, "_")}"
+                "${context.sortOrder} ${illegalReplace(context.track.title)}"
             else
-                illegalChars.replace(context.track.title, "_")
+                illegalReplace(context.track.title)
         progressFlow.emit(Progress(4, 3))
         val finalFile = getUniqueFile(file.parentFile!!, sanitizedTitle, detectedExtension, file)
         progressFlow.emit(Progress(4, 4))
