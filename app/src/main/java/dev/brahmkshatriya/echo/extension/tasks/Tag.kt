@@ -198,7 +198,7 @@ class Tag(
                         append("-c copy ")
                     }
                     if (fileExtension == "mp3") {
-                        // append("-id3v2_version 3 ")
+                        append("-id3v2_version 3 ")
                     }
                 }
 
@@ -238,6 +238,7 @@ class Tag(
             append("-metadata $mdServiceProvider ")
             if (lyricsText != null) {
                 if (fileExtension == "mp3") {
+                    append("-id3v2_text_enc 1 ")
                     append("-metadata lyrics-eng=\"${lyricsText.replace("\"", "'")}\" ")
                 } else {
                     append("-metadata lyrics=\"${lyricsText.replace("\"", "'")}\" ")
