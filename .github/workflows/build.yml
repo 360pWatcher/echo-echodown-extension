@@ -10,6 +10,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       
       - name: set up JDK 17
         uses: actions/setup-java@v3
@@ -24,8 +26,15 @@ jobs:
       - name: Build APK
         run: ./gradlew assembleDebug
 
-      - name: Upload APK
+      - name: Rename APK to EAPK
+        run: |
+          cd app/build/outputs/apk/debug/
+          for file in *.apk; do
+            mv "$file" "${file%.apk}.eapk"
+          done
+
+      - name: Upload EAPK
         uses: actions/upload-artifact@v4
         with:
-          name: echo-extension-debug
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: echo-extension-eapks
+          path: app/build/outputs/apk/debug/*.eapk
