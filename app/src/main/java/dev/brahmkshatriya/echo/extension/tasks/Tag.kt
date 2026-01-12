@@ -198,7 +198,8 @@ class Tag(
                         append("-c copy ")
                     }
                     if (fileExtension == "mp3") {
-                        // append("-id3v2_version 3 ")
+                        append("-id3v2_version 3 ")
+                        append("-write_id3v1 0 ")
                     }
                 }
 
@@ -239,7 +240,7 @@ class Tag(
             if (lyricsText != null) {
                 if (fileExtension == "mp3") {
                     // append("-id3v2_text_enc 1 ")
-                    append("-metadata lyrics-eng=\"${lyricsText.replace("\"", "'")}\" ")
+                    append("-metadata lyrics-jpn=\"${lyricsText.replace("\"", "'")}\" ")
                 } else {
                     append("-metadata lyrics=\"${lyricsText.replace("\"", "'")}\" ")
                 }
