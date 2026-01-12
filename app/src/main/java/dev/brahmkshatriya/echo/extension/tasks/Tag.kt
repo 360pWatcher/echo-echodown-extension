@@ -198,7 +198,7 @@ class Tag(
                         append("-c copy ")
                     }
                     if (fileExtension == "mp3") {
-                        // append("-id3v2_version 3 ")
+                        append("-id3v2_version 3 ")
                     }
                 }
 
